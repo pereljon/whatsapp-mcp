@@ -640,10 +640,20 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		MediaType:     waMediaType,
 	}
 
-	// Download the media using whatsmeow client
-	mediaData, err := client.Download(downloader)
-	if err != nil {
-		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
+	// Download the media using whatsmeow client, retrying on transient 403s
+	// (expired media-auth token on WhatsApp's CDN - see github.com/tulir/whatsmeow/discussions/963)
+	var mediaData []byte
+	retryDelays := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+	for attempt := 0; ; attempt++ {
+		mediaData, err = client.Download(context.Background(), downloader)
+		if err == nil {
+			break
+		}
+		if attempt >= len(retryDelays) || !strings.Contains(err.Error(), "403") {
+			return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
+		}
+		fmt.Printf("Download attempt %d for message %s got 403, retrying in %s...\n", attempt+1, messageID, retryDelays[attempt])
+		time.Sleep(retryDelays[attempt])
 	}
 
 	// Save the downloaded media to file
@@ -800,14 +810,14 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}
 
 	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice()
+	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// No device exists, create one
@@ -973,7 +983,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 		// If we didn't get a name, try group info
 		if name == "" {
-			groupInfo, err := client.GetGroupInfo(jid)
+			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
 			if err == nil && groupInfo.Name != "" {
 				name = groupInfo.Name
 			} else {
@@ -988,7 +998,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		logger.Infof("Getting name for contact: %s", chatJID)
 
 		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(jid)
+		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
 		} else if sender != "" {
